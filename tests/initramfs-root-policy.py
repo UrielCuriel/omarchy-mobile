@@ -44,8 +44,11 @@ with tempfile.TemporaryDirectory() as tmp:
         assert [(out / n).read_text().strip() for n in names] == ['omamobile-root', mode, 'no']
     for i, bad in enumerate(('INITRAMFS_ROOT_LABEL=wrong\n', 'INITRAMFS_ROOT_LABEL=""\n',
                              'INITRAMFS_ROOT_MODE=unknown\n', 'INITRAMFS_ROOT_MODE=ram-rescue\n',
-                             'INITRAMFS_USB_RECOVERY=maybe\n')):
+                             'INITRAMFS_USB_RECOVERY=maybe\n', 'INITRAMFS_UFS_READ_ONLY=maybe\n')):
         pack(bad, 'bad-' + str(i), False)
+    assert (default / 'omamobile-ufs-rw').read_text().strip()
+    assert (pack('INITRAMFS_UFS_READ_ONLY=no\n', 'ufs-rw-no') / 'omamobile-ufs-rw').read_text().strip()
+    assert not (pack('INITRAMFS_UFS_READ_ONLY=yes\n', 'ufs-ro') / 'omamobile-ufs-rw').exists()
     print('ok - default packing is unchanged; explicit policies validated before output')
 
     (fixture / 'initramfs').mkdir()
@@ -54,6 +57,7 @@ with tempfile.TemporaryDirectory() as tmp:
         ('INITRAMFS_ROOT_LABEL=omamobile-root\nINITRAMFS_ROOT_MODE=persistent-development\n', 'INITRAMFS_ROOT_MODE'),
         ('INITRAMFS_ROOT_LABEL=omamobile-root\nINITRAMFS_ROOT_MODE=ram-rescue\n', 'INITRAMFS_ROOT_MODE'),
         ('INITRAMFS_USB_RECOVERY=no\n', 'INITRAMFS_USB_RECOVERY=no'),
+        ('INITRAMFS_UFS_READ_ONLY=yes\n', 'INITRAMFS_UFS_READ_ONLY=yes'),
     )):
         conf.write_text(descriptor + '\n' + extra)
         output = p / ('release-' + str(i))
@@ -62,7 +66,7 @@ with tempfile.TemporaryDirectory() as tmp:
                                 capture_output=True, text=True)
         assert result.returncode != 0 and message in result.stderr and 'not --release' in result.stderr, result
         assert not output.exists() and not (p / 'work').exists()
-    print('ok - development root mode and disabled USB recovery refuse release builds before downloads')
+    print('ok - development root mode, disabled USB recovery and read-only UFS refuse release builds before downloads')
 
     nfsfile = p / 'nfsroot'
     dispatch = source.rsplit('# A requested NFS root must not silently fall through', 1)[1].split('\nfi', 1)[0].split('\n', 1)[1] + '\nfi\n'

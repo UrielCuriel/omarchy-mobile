@@ -535,6 +535,10 @@ initramfs_config() {
     [[ $DEV_INITRAMFS_USB_RECOVERY == yes || $DEV_INITRAMFS_USB_RECOVERY == no ]] ||
       die "INITRAMFS_USB_RECOVERY must be yes, no or absent"
   fi
+  if [[ -n ${DEV_INITRAMFS_UFS_READ_ONLY+x} ]]; then
+    [[ $DEV_INITRAMFS_UFS_READ_ONLY == yes || $DEV_INITRAMFS_UFS_READ_ONLY == no ]] ||
+      die "INITRAMFS_UFS_READ_ONLY must be yes, no or absent"
+  fi
   # load_device has checked UFS_RW (names, slot B boot images, userdata);
   # pack it as one line with single spaces, the form the init accepts
   read -ra rw <<<"$DEV_UFS_RW"
@@ -586,7 +590,12 @@ initramfs_config() {
   fi
   # The storage guard's allowlist. Without this file the init leaves every
   # partition read-only.
-  printf '%s\n' "${rw[*]}" > "$etc/omamobile-ufs-rw"
+  # INITRAMFS_UFS_READ_ONLY=yes packs no allowlist at all, so the init keeps
+  # every partition read-only whatever UFS_RW says: for a phone whose slot B
+  # and userdata still belong to stock while its UFS is brought up.
+  if [[ ${DEV_INITRAMFS_UFS_READ_ONLY:-no} != yes ]]; then
+    printf '%s\n' "${rw[*]}" > "$etc/omamobile-ufs-rw"
+  fi
   if [[ -n ${DEV_UFS_RW_LUNS:-} ]]; then
     printf '%s\n' "$DEV_UFS_RW_LUNS" > "$etc/omamobile-ufs-rw-luns"
   fi
@@ -664,6 +673,8 @@ cmd_initramfs() {
       die "INITRAMFS_ROOT_MODE is for local bring-up only, not --release"
     [[ ${DEV_INITRAMFS_USB_RECOVERY:-yes} != no ]] ||
       die "INITRAMFS_USB_RECOVERY=no is for local bring-up only, not --release"
+    [[ ${DEV_INITRAMFS_UFS_READ_ONLY:-no} != yes ]] ||
+      die "INITRAMFS_UFS_READ_ONLY=yes is for local bring-up only, not --release"
   fi
   if [[ -n ${OMAMOBILE_NFSROOT:-} ]]; then
     ((release == 0)) || die "OMAMOBILE_NFSROOT is for local bring-up only, not --release"
