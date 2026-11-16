@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Make the stage 2 DTB for the wly kexec chain-loader.
 
-Usage: stage2-dtb.py <built wly.dtb> <live.dtb> <out.dtb> [rscpd] [usb] [splash]
+Usage: stage2-dtb.py <built wly.dtb> <live.dtb> <out.dtb> [rscpd] [splash]
 
 Adapted from device/dodge/chainload/stage2-dtb.py. ABL fills the `memory`
 node at boot and kexec does not, so its reg is taken from the phone's live
@@ -13,13 +13,14 @@ port, so dodge's fb, peripheral and hs options are not needed here.
 rscpd   drop power-domains from the apps RSC (rsc@17a00000), so RPMh does
         not wait on PSCI's cpuidle genpd, which does not bind after kexec
         (dodge's finding on sm8750; sm8450's apps RSC has the same supplier)
-usb     drop usb-role-switch and the dwc3 iommus entry: the role would
-        come from pmic_glink, which the initramfs does not load, and dodge
-        found the stream blocked under ARM_SMMU_DISABLE_BYPASS_BY_DEFAULT
-        after kexec
 splash  label ABL's splash reservation and give mdss an identity map of
-        it, so arm-smmu keeps the scan-out working (mdss stays disabled;
-        untried on this phone)
+        it (iommu-addresses); untried on this phone
+
+Not here on purpose: dodge's dwc3 changes. With its iommus entry dropped
+the dwc3 node's first DMA reset the whole SoC at dwc3-qcom probe (2026-11-15,
+four boots; the screen went dark at "Run /init" and the phone came back
+only from the buttons), and with it kept USB enumerates. Dropping the PDC
+wake-up interrupts changed nothing.
 """
 import re
 import subprocess
@@ -67,7 +68,7 @@ def drop_prop(s, header, prop, indent):
 
 built, live, out, *opts = sys.argv[1:]
 for o in opts:
-    if o not in ("rscpd", "usb", "splash"):
+    if o not in ("rscpd", "splash"):
         raise SystemExit(f"unknown option {o}")
 ours, theirs = dts(built), dts(live)
 
@@ -81,10 +82,6 @@ if len(re.findall(r"\n\tmemory(@[0-9a-fA-F]+)? \{", ours)) != 1:
 
 if "rscpd" in opts:
     ours = drop_prop(ours, "\n\t\trsc@17a00000 {", "power-domains", 3)
-
-if "usb" in opts:
-    ours = drop_prop(ours, "\n\t\tusb@a600000 {", "usb-role-switch", 3)
-    ours = drop_prop(ours, "\n\t\tusb@a600000 {", "iommus", 3)
 
 if "splash" in opts:
     if "splash-region@b8000000 {" not in ours or 'compatible = "qcom,sm8450-mdss";' not in ours:
