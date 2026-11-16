@@ -2,12 +2,13 @@
 # SPDX-License-Identifier: MIT
 # Every caller of tools/alpine-fetch.py stops when it fails, before it uses
 # any of the list (no network): bin/omamobile initramfs's packages, its
-# INITRAMFS_I2C_TOOLS i2c-tools and its musl sysroot's musl-dev, and
+# INITRAMFS_I2C_TOOLS i2c-tools, its INITRAMFS_RADIO_TOOLS packages and its
+# musl sysroot's musl-dev, and
 # tools/dodge-chain pack's busybox-static. A stand-in for alpine-fetch.py
 # prints one package it "fetched" (an .apk holding marker-<package>), then
 # exits 1 when asked for FETCH_FAIL_ON. A `for apk in $(…)` loop ignores that
 # status and unpacks what was printed; a caller must not. Each of
-# bin/omamobile's three also stops when a package it was given doesn't
+# bin/omamobile's four also stops when a package it was given doesn't
 # unpack (FETCH_BROKEN: a file that isn't an archive), naming the file and
 # with tar's own message; the stand-in packages are in Alpine's .apk
 # layout, and unpack with none of tar's warnings in the output. A stand-in
@@ -69,9 +70,16 @@ done
 mkdir -p "$t/apk-src/i2c/usr/sbin" "$t/apk-src/i2c/usr/lib"
 : > "$t/apk-src/i2c/usr/sbin/i2cget"; : > "$t/apk-src/i2c/usr/sbin/i2cset"; : > "$t/apk-src/i2c/usr/lib/libi2c.so.0"
 apk "$t/apk-src/i2c" "$t/apks/i2c-tools.apk"
+# What the initramfs checks for from the radio tools (one stand-in .apk for
+# the three packages: the stand-in fetch prints only the first)
+mkdir -p "$t/apk-src/radio/sbin" "$t/apk-src/radio/usr/sbin" "$t/apk-src/radio/usr/bin"
+for f in sbin/wpa_supplicant usr/sbin/iw usr/bin/btmgmt; do
+  printf '#!/bin/sh\n' > "$t/apk-src/radio/$f"; chmod 755 "$t/apk-src/radio/$f"
+done
+apk "$t/apk-src/radio" "$t/apks/wpa_supplicant.apk"
 # A package that doesn't unpack, such as a damaged file in the cache (which
 # alpine-fetch.py takes at the index's size), and what tar says about it
-for p in dropbear i2c-tools musl-dev; do head -c 512 /dev/zero > "$t/apks/broken-$p.apk"; done
+for p in dropbear i2c-tools musl-dev wpa_supplicant; do head -c 512 /dev/zero > "$t/apks/broken-$p.apk"; done
 tar_says=$(tar -xzf "$t/apks/broken-dropbear.apk" -C "$t/apk-src" 2>&1 || :)
 [[ -n $tar_says ]] || { echo "not ok - tar says nothing about a file that isn't an archive" >&2; exit 1; }
 
@@ -191,6 +199,23 @@ unpack_stopped "INITRAMFS_I2C_TOOLS (unpack)" i2c-tools
 [[ -z $(ls -A "$t/tmp") ]] || fail "INITRAMFS_I2C_TOOLS (unpack): left its scratch directory ($(ls -A "$t/tmp"))"
 grep -c -F "no usr/sbin/i2cget" "$t/log" >/dev/null && fail "INITRAMFS_I2C_TOOLS (unpack): went on to look for i2cget"
 pass "bin/omamobile initramfs stops when i2c-tools doesn't unpack, says so with tar's message, and removes its scratch directory"
+
+initramfs wly
+[[ -x $stage/sbin/wpa_supplicant && -x $stage/usr/sbin/iw && -x $stage/usr/bin/btmgmt ]] || fail "wly: a successful radio tools fetch is unpacked"
+[[ -x $stage/usr/sbin/omamobile-radio-addr ]] || fail "wly: no omamobile-radio-addr"
+grep -c -F "alpine musl sysroot has no libc.a" "$t/log" >/dev/null || fail "wly: the stand-in build stops at the sysroot's libc.a"
+grep -c "tar: " "$t/log" >/dev/null && fail "wly: tar's output in the build's output"
+pass "bin/omamobile initramfs installs the radio tools from a successful fetch"
+
+initramfs wly wpa_supplicant
+stopped "INITRAMFS_RADIO_TOOLS" wpa_supplicant
+[[ ! -e $stage/sbin/wpa_supplicant && ! -e $stage/usr/sbin/omamobile-radio-addr ]] || fail "INITRAMFS_RADIO_TOOLS: unpacked a list from a failed fetch"
+pass "bin/omamobile initramfs stops when the radio tools fail, before unpacking any"
+
+initramfs wly '' wpa_supplicant
+unpack_stopped "INITRAMFS_RADIO_TOOLS (unpack)" wpa_supplicant
+[[ ! -e $stage/usr/sbin/omamobile-radio-addr ]] || fail "INITRAMFS_RADIO_TOOLS (unpack): went on to install omamobile-radio-addr"
+pass "bin/omamobile initramfs stops when a radio tools package doesn't unpack, and says which, with tar's message"
 
 initramfs cheetah musl-dev
 stopped "musl sysroot" musl-dev

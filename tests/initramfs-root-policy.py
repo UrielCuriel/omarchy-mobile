@@ -44,7 +44,8 @@ with tempfile.TemporaryDirectory() as tmp:
         assert [(out / n).read_text().strip() for n in names] == ['omamobile-root', mode, 'no']
     for i, bad in enumerate(('INITRAMFS_ROOT_LABEL=wrong\n', 'INITRAMFS_ROOT_LABEL=""\n',
                              'INITRAMFS_ROOT_MODE=unknown\n', 'INITRAMFS_ROOT_MODE=ram-rescue\n',
-                             'INITRAMFS_USB_RECOVERY=maybe\n', 'INITRAMFS_UFS_READ_ONLY=maybe\n')):
+                             'INITRAMFS_USB_RECOVERY=maybe\n', 'INITRAMFS_UFS_READ_ONLY=maybe\n',
+                             'INITRAMFS_RADIO_TOOLS=yes\n')):
         pack(bad, 'bad-' + str(i), False)
     assert (default / 'omamobile-ufs-rw').read_text().strip()
     assert (pack('INITRAMFS_UFS_READ_ONLY=no\n', 'ufs-rw-no') / 'omamobile-ufs-rw').read_text().strip()

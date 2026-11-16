@@ -1,0 +1,73 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+# initramfs/omamobile-radio-addr against stand-ins for ip and btmgmt and a
+# made-up SoC serial (no phone): the Wi-Fi and Bluetooth addresses are
+# locally administered unicast, differ from each other, are the same on a
+# second run and differ for another serial; hci0 gets one only while mgmt
+# says it is missing; wlan0 is left up only if it was up; and neither the
+# serial nor an address reaches the output.
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
+fail() { echo "not ok - $*" >&2; exit 1; }
+pass() { echo "ok - $*"; }
+
+mkdir -p "$t/bin" "$t/sys/class/net/wlan0"
+sed "s|^SERIAL=.*|SERIAL=$t/serial|; s|/sys/class/net/wlan0|$t/sys/class/net/wlan0|" \
+  initramfs/omamobile-radio-addr > "$t/radio-addr"
+chmod 755 "$t/radio-addr"
+grep -q "^SERIAL=$t/serial$" "$t/radio-addr" || fail "could not point the script at a made-up serial"
+
+# ip: records `link set wlan0 address X`; `link show` says UP when $t/up exists
+cat > "$t/bin/ip" <<EOF
+#!/bin/sh
+case "\$*" in
+  "-o link show wlan0") [ -e "$t/up" ] && echo "3: wlan0: <BROADCAST,UP,LOWER_UP>" || echo "3: wlan0: <BROADCAST>" ;;
+  "link set wlan0 address "*) echo "\$5" > "$t/wlan" ;;
+  "link set wlan0 up") touch "$t/set-up" ;;
+esac
+EOF
+# btmgmt: unconfigured until public-addr, which it records
+cat > "$t/bin/btmgmt" <<EOF
+#!/bin/sh
+case "\$*" in
+  info) [ -e "$t/bt" ] && echo "hci0:	Primary controller" ;;
+  "--index 0 config") [ -e "$t/bt" ] || echo "hci0:	missing options: public-address" ;;
+  "--index 0 public-addr "*) echo "\$4" > "$t/bt"; echo "hci0 public address set to \$4" ;;
+esac
+EOF
+chmod 755 "$t/bin/ip" "$t/bin/btmgmt"
+
+run() { PATH="$t/bin:$PATH" "$t/radio-addr" > "$t/out" 2>&1; }
+la='^[0-9a-f][26ae](:[0-9a-f]{2}){5}$'
+
+echo 1234567890 > "$t/serial"
+touch "$t/up"
+run || fail "first run failed: $(cat "$t/out")"
+w1=$(cat "$t/wlan"); b1=$(cat "$t/bt")
+[[ $w1 =~ $la && $b1 =~ $la ]] || fail "addresses are not locally administered unicast"
+[[ $w1 != "$b1" ]] || fail "Wi-Fi and Bluetooth got the same address"
+[[ -e $t/set-up ]] || fail "wlan0 was up and was not brought back up"
+grep -qiE "$w1|$b1|1234567890" "$t/out" && fail "an address or the serial reached the output"
+pass "locally administered addresses, Wi-Fi and Bluetooth apart, nothing private printed"
+
+rm -f "$t/bt" "$t/up" "$t/set-up"
+run || fail "second run failed: $(cat "$t/out")"
+[[ $(cat "$t/wlan") == "$w1" && $(cat "$t/bt") == "$b1" ]] || fail "a second run gave other addresses"
+[[ ! -e $t/set-up ]] || fail "wlan0 was down and was brought up"
+pass "the same addresses on every run; a down wlan0 stays down"
+
+run || fail "configured run failed"
+grep -q "already configured" "$t/out" || fail "a configured hci0 was given an address again"
+pass "a configured hci0 is left alone"
+
+rm -f "$t/bt"
+echo 987654321 > "$t/serial"
+run || fail "other-serial run failed"
+[[ $(cat "$t/wlan") != "$w1" && $(cat "$t/bt") != "$b1" ]] || fail "another serial gave the same addresses"
+pass "another phone gets other addresses"
+
+rm -f "$t/serial"
+run && fail "ran without a serial"
+grep -q "CONFIG_QCOM_SOCINFO" "$t/out" || fail "no serial: the message doesn't say why"
+pass "no serial: stops and says why"

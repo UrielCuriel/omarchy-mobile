@@ -1,0 +1,77 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Give wlan0 and hci0 stable addresses on a phone whose radio chip carries
+# only a placeholder (the OnePlus 10 Pro's QCA6490: Wi-Fi 00:03:7f:…, the
+# same on every unit, and Bluetooth none at all, so hci0 stays
+# unconfigured). The real ones live in the modem's NV, which nothing here
+# reads. Packed with INITRAMFS_RADIO_TOOLS=1; run by hand.
+#
+# Each address is a SHA-256 of a fixed label and the SoC's serial number
+# (qcom socinfo: /sys/devices/soc0/serial_number), so it is the same on
+# every boot of this phone and differs between phones, with no state on
+# the phone. The first octet is made locally administered and unicast.
+# Neither the serial nor the addresses are printed.
+set -u
+SERIAL=/sys/devices/soc0/serial_number
+
+log() { echo "omamobile-radio-addr: $*"; }
+
+[ -s "$SERIAL" ] || { log "no $SERIAL (CONFIG_QCOM_SOCINFO)"; exit 1; }
+
+# LABEL: the address for LABEL, as aa:bb:cc:dd:ee:ff
+addr() {
+	h=$(printf '%s:%s' "$1" "$(cat "$SERIAL")" | sha256sum | cut -c1-12)
+	first=$(( (0x$(echo "$h" | cut -c1-2) & 0xfc) | 0x02 ))
+	# shellcheck disable=SC2046  # five two-digit words, split on purpose
+	printf '%02x:%s:%s:%s:%s:%s\n' "$first" $(echo "$h" | cut -c3- | sed 's/../& /g')
+}
+
+rc=0
+
+if [ -e /sys/class/net/wlan0 ]; then
+	up=$(ip -o link show wlan0 | grep -c '[<,]UP[,>]')
+	if ip link set wlan0 down &&
+	   ip link set wlan0 address "$(addr omamobile-wlan)"; then
+		log "wlan0: address set"
+	else
+		log "wlan0: could not set the address"
+		rc=1
+	fi
+	[ "$up" -eq 0 ] || ip link set wlan0 up
+else
+	log "no wlan0"
+fi
+
+# hci0 shows up before hci_qca has loaded its firmware: wait until mgmt
+# reports it configured, or unconfigured for want of a public address
+state=
+i=0
+while [ $i -lt 60 ]; do
+	if btmgmt info 2>/dev/null | grep -q '^hci0:.*Primary controller'; then
+		state=configured
+		break
+	fi
+	if btmgmt --index 0 config 2>/dev/null |
+	   grep -q 'missing options:.*public-address'; then
+		state=needs-address
+		break
+	fi
+	sleep 0.5
+	i=$((i + 1))
+done
+case $state in
+configured)
+	log "hci0: already configured" ;;
+needs-address)
+	if btmgmt --index 0 public-addr "$(addr omamobile-bt)" > /dev/null 2>&1; then
+		log "hci0: address set"
+	else
+		log "hci0: could not set the address"
+		rc=1
+	fi ;;
+*)
+	log "hci0: not ready after 30 s"
+	rc=1 ;;
+esac
+
+exit $rc

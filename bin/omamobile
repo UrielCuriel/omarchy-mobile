@@ -508,6 +508,9 @@ initramfs_config() {
   if [[ -n ${DEV_INITRAMFS_FB_WAIT:-} ]]; then
     [[ $DEV_INITRAMFS_FB_WAIT == 1 ]] || die "INITRAMFS_FB_WAIT must be 1 or absent"
   fi
+  if [[ -n ${DEV_INITRAMFS_RADIO_TOOLS:-} ]]; then
+    [[ $DEV_INITRAMFS_RADIO_TOOLS == 1 ]] || die "INITRAMFS_RADIO_TOOLS must be 1 or absent"
+  fi
   if [[ -n ${DEV_SIMPLEFB_TRIG_CON:-} ]]; then
     local rest=$DEV_SIMPLEFB_TRIG_CON trig_pairs=()
     while [[ -n $rest ]]; do
@@ -731,6 +734,21 @@ cmd_initramfs() {
     rm -rf "$i2c"
   elif [[ -n ${DEV_INITRAMFS_I2C_TOOLS:-} ]]; then
     die "INITRAMFS_I2C_TOOLS must be 1 or absent"
+  fi
+  # INITRAMFS_RADIO_TOOLS=1: wpa_supplicant, iw and btmgmt (whole packages,
+  # with their libraries) to join a network and configure Bluetooth before
+  # there is a root, and omamobile-radio-addr for chips without addresses
+  if [[ ${DEV_INITRAMFS_RADIO_TOOLS:-} == 1 ]]; then
+    apks=$(python3 -I "$ROOT/tools/alpine-fetch.py" "$ver" "$dl/apks" wpa_supplicant iw bluez-btmgmt) ||
+      die "INITRAMFS_RADIO_TOOLS: tools/alpine-fetch.py failed for the radio tools"
+    for apk in $apks; do
+      unpack_apk "$apk" "$stage" --exclude='.PKGINFO' --exclude='.SIGN.*' --exclude='.*.sh' ||
+        die "INITRAMFS_RADIO_TOOLS: could not unpack $apk"
+    done
+    for f in sbin/wpa_supplicant usr/sbin/iw usr/bin/btmgmt; do
+      [[ -x $stage/$f ]] || die "INITRAMFS_RADIO_TOOLS: no /$f in Alpine's packages"
+    done
+    install -Dm755 "$ROOT/initramfs/omamobile-radio-addr" "$stage/usr/sbin/omamobile-radio-addr"
   fi
   for f in sbin/e2fsck usr/sbin/resize2fs usr/sbin/dumpe2fs; do
     [[ -x $stage/$f ]] || die "the initramfs has no /$f"
