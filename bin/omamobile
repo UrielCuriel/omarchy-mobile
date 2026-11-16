@@ -972,7 +972,7 @@ cmd_images() {
     STAGE2_INITRD="$KERNEL_OUT/initramfs.cpio.lz4" \
     CHAIN_OUT="$chain_out" \
     LIVE_DTB="$LIVE_DTB" \
-    DTB_OPTS="${DTB_OPTS:-splash fb}" \
+    DTB_OPTS="${DTB_OPTS:-${DEV_DTB_OPTS:-splash fb}}" \
     STAGE2_CMDLINE="$stage2_cmdline" \
     SLOT_SUFFIX="${SLOT_SUFFIX:-${DEV_OMAMOBILE_SLOT:+_$DEV_OMAMOBILE_SLOT}}" \
     JOBS="$JOBS" \
