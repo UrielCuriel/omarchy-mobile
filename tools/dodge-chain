@@ -12,7 +12,9 @@
 # our DTB, the shared initramfs from bin/omamobile initramfs.
 #
 # Stage 1's .config disables SCSI_UFS_QCOM / SCSI_UFSHCD so the kernel does
-# not probe UFS on stock's DTB (CONTRIBUTING §3.2).
+# not probe UFS on stock's DTB (CONTRIBUTING §3.2), and QCOM_PMIC_GLINK,
+# which matches stock's downstream "qcom,pmic-glink" node: probed there, it
+# reset wly's SoC before stage 2 ran (2026-11-16).
 #
 # CHAINLOAD_DIR must point at device/$DEVICE/chainload/ (splash/panel/RSC
 # values live there; this tool has no device hardcodes). bin/omamobile
@@ -249,7 +251,7 @@ file /omamobile/slot_suffix $work/slot_suffix 0644 0 0
 file /omamobile/memory.reg $work/memory.reg 0644 0 0
 LIST
 
-  say "Stage 1 kernel in $CHAIN_OUT (UFS off)"
+  say "Stage 1 kernel in $CHAIN_OUT (UFS and pmic_glink off)"
   cp "$STAGE2_OUT/.config" "$CHAIN_OUT/.config"
   # Escape for embedding in the container script.
   stage1_in_toolchain "
@@ -258,12 +260,17 @@ LIST
       --set-str INITRAMFS_SOURCE '$work/list' \\
       --disable INITRAMFS_COMPRESSION_GZIP --enable INITRAMFS_COMPRESSION_ZSTD \\
       --set-str CMDLINE '$STAGE1_CMDLINE' --enable CMDLINE_FORCE \\
-      --disable SCSI_UFS_QCOM --disable SCSI_UFSHCD
+      --disable SCSI_UFS_QCOM --disable SCSI_UFSHCD --disable QCOM_PMIC_GLINK
     make -s -C '$KERNEL_DIR' O='$CHAIN_OUT' ARCH=arm64 LLVM=1 olddefconfig
-    # Confirm UFS stayed off after olddefconfig (no select pulled it back).
+    # Confirm UFS and pmic_glink stayed off after olddefconfig (no select
+    # pulled them back).
     if grep -q '^CONFIG_SCSI_UFS_QCOM=y' '$CHAIN_OUT/.config' || \
        grep -q '^CONFIG_SCSI_UFSHCD=y' '$CHAIN_OUT/.config'; then
       echo 'SCSI_UFS_QCOM/SCSI_UFSHCD still enabled in stage 1' >&2
+      exit 1
+    fi
+    if grep -q '^CONFIG_QCOM_PMIC_GLINK=[ym]' '$CHAIN_OUT/.config'; then
+      echo 'QCOM_PMIC_GLINK still enabled in stage 1' >&2
       exit 1
     fi
     make -s -C '$KERNEL_DIR' O='$CHAIN_OUT' ARCH=arm64 LLVM=1 -j$JOBS Image
