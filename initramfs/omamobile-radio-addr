@@ -11,10 +11,19 @@
 # every boot of this phone and differs between phones, with no state on
 # the phone. The first octet is made locally administered and unicast.
 # Neither the serial nor the addresses are printed.
+#
+# Usage: omamobile-radio-addr [wlan0|hci0]   (no argument: both)
+# The init's Wi-Fi rescue link asks for wlan0 alone: it must not wait on
+# Bluetooth.
 set -u
 SERIAL=/sys/devices/soc0/serial_number
 
 log() { echo "omamobile-radio-addr: $*"; }
+
+case ${1:-all} in
+all|wlan0|hci0) only=${1:-all} ;;
+*) log "usage: omamobile-radio-addr [wlan0|hci0]"; exit 2 ;;
+esac
 
 [ -s "$SERIAL" ] || { log "no $SERIAL (CONFIG_QCOM_SOCINFO)"; exit 1; }
 
@@ -28,7 +37,9 @@ addr() {
 
 rc=0
 
-if [ -e /sys/class/net/wlan0 ]; then
+if [ "$only" = hci0 ]; then
+	:
+elif [ -e /sys/class/net/wlan0 ]; then
 	up=$(ip -o link show wlan0 | grep -c '[<,]UP[,>]')
 	if ip link set wlan0 down &&
 	   ip link set wlan0 address "$(addr omamobile-wlan)"; then
@@ -41,6 +52,8 @@ if [ -e /sys/class/net/wlan0 ]; then
 else
 	log "no wlan0"
 fi
+
+[ "$only" = wlan0 ] && exit $rc
 
 # hci0 shows up before hci_qca has loaded its firmware: wait until mgmt
 # reports it configured, or unconfigured for want of a public address

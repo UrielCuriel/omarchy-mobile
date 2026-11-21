@@ -346,6 +346,32 @@ mkdir -p /etc/dropbear
 dropbear -R -E -p 22 2>/dev/null && say "ssh: root@172.16.42.1"
 ( while true; do setsid getty -n -l /bin/sh 115200 ttyGS0 vt100; sleep 1; done ) &
 
+# Wi-Fi rescue link for local bring-up, so ssh survives losing USB (testing
+# USB roles, replugging the cable). Only with omamobile.initramfs, and only
+# when the image carries /etc/omamobile-wifi/wpa_supplicant.conf and
+# /etc/omamobile-wifi/address (one "ip/prefix" line). Nothing in this
+# repository packs them: the network's key belongs to the developer, who
+# appends them as a cpio of their own. No files, no change.
+wifi_rescue() {
+  local conf=/etc/omamobile-wifi/wpa_supplicant.conf
+  grep -q omamobile.initramfs /proc/cmdline || return 0
+  [ -s $conf ] && [ -s /etc/omamobile-wifi/address ] || return 0
+  command -v wpa_supplicant >/dev/null || {
+    say "wifi: no wpa_supplicant (INITRAMFS_RADIO_TOOLS=1)"; return 0; }
+  (
+    # wlan0 appears once the chip has booted its firmware
+    for i in $(seq 1 90); do [ -e /sys/class/net/wlan0 ] && break; sleep 1; done
+    [ -e /sys/class/net/wlan0 ] || { say "wifi: no wlan0"; exit 0; }
+    command -v omamobile-radio-addr >/dev/null && omamobile-radio-addr wlan0 >/dev/null 2>&1
+    ip link set wlan0 up
+    wpa_supplicant -B -i wlan0 -c $conf -P /run/wpa_supplicant.pid >/dev/null 2>&1 ||
+      { say "wifi: wpa_supplicant failed"; exit 0; }
+    ip addr add "$(cat /etc/omamobile-wifi/address)" dev wlan0 &&
+      say "wifi: rescue link, ssh root@$(cut -d/ -f1 /etc/omamobile-wifi/address)"
+  ) &
+}
+wifi_rescue
+
 # Bring-up diagnostics on screen when the cmdline has omamobile.debug: USB log
 # lines, whether interrupts arrive, and what the bootloader passed in.
 grep -q omamobile.debug /proc/cmdline && {
