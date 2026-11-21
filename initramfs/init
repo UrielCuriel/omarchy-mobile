@@ -117,19 +117,34 @@ ufs_rw_load() {
 ufs_rw_load
 mkdir -p /run/ufs-ro
 ufs_partname() { sed -n 's/^PARTNAME=//p' "$1/uevent" 2>/dev/null; }
+# ufs_seq SYSFS_PATH: set $seq to the disk's diskseq, which the kernel never
+# reuses for a new instance of a disk (a partition takes its disk's). The
+# guard keys its "done" marks on it, so a disk that goes and comes back
+# under the same name (a USB drive replugged) is guarded again. Empty
+# without diskseq (older kernels): the marks then match as before.
+ufs_seq() {
+  seq=
+  if [ -r "$1/diskseq" ]; then read -r seq < "$1/diskseq"
+  elif [ -r "${1%/*}/diskseq" ]; then read -r seq < "${1%/*}/diskseq"
+  fi 2>/dev/null
+}
 ufs_ro_pass() {
-  local s ro name part disk
+  local s ro name part disk seq mark
   for s in /sys/block/sd* /sys/block/sd*/sd*; do
     [ -r "$s/ro" ] || continue
     name=${s##*/}
-    [ -e "/run/ufs-ro/$name" ] && continue
+    ufs_seq "$s"
+    if [ -e "/run/ufs-ro/$name" ]; then
+      mark=; read -r mark 2>/dev/null < "/run/ufs-ro/$name"
+      [ "$mark" = "$seq" ] && continue
+    fi
     [ -b "/dev/$name" ] || continue  # devtmpfs node not there yet: next pass
     if ufs_rw_disk "$name"; then
       if [ -s /etc/omamobile-nfsroot ]; then
         blockdev --setro "/dev/$name"
         read -r ro < "$s/ro"
         if [ "$ro" = 1 ]; then
-          : > "/run/ufs-ro/$name"
+          echo "$seq" > "/run/ufs-ro/$name"
           ufs_ro_log "/dev/$name set read-only for NFS root"
           continue
         fi
@@ -138,24 +153,28 @@ ufs_ro_pass() {
         continue
       fi
       rm -f "/dev/$name"
-      : > "/run/ufs-ro/$name"
+      echo "$seq" > "/run/ufs-ro/$name"
       ufs_ro_log "/dev/$name: whole-disk node removed (partitions guarded individually)"
       continue
     fi
     part=$(ufs_partname "$s")
     if [ -n "$part" ] && ufs_rw_disk "${name%%[0-9]*}" && \
        case " $UFS_RW " in *" $part "*) true ;; *) false ;; esac; then
-      : > "/run/ufs-ro/$name"
+      echo "$seq" > "/run/ufs-ro/$name"
       ufs_ro_log "/dev/$name ($part) left writable (allowlist)"
       continue
     fi
     blockdev --setro "/dev/$name"
     read -r ro < "$s/ro"
     if [ "$ro" = 1 ]; then
-      : > "/run/ufs-ro/$name"
+      echo "$seq" > "/run/ufs-ro/$name"
       ufs_ro_log "/dev/$name${part:+ ($part)} set read-only"
-    elif [ ! -e "/run/ufs-ro/$name.failed" ]; then
-      : > "/run/ufs-ro/$name.failed"  # keep retrying, but log once
+    else
+      if [ -e "/run/ufs-ro/$name.failed" ]; then
+        mark=; read -r mark 2>/dev/null < "/run/ufs-ro/$name.failed"
+        [ "$mark" = "$seq" ] && continue
+      fi
+      echo "$seq" > "/run/ufs-ro/$name.failed"  # keep retrying, but log once per disk
       ufs_ro_log "FAILED to set /dev/$name read-only"
       echo "omamobile: WARNING: /dev/$name is NOT read-only" > /dev/tty0 2>/dev/null
     fi

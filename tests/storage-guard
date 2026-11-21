@@ -259,3 +259,44 @@ pass "a malformed LUN list leaves every LUN but sda read-only"
 fake_disks
 printf 'boot_b userdata persist\n' > "$B/etc/omamobile-ufs-rw"; printf 'sde\n' > "$B/etc/omamobile-ufs-rw-luns"
 closed "a closed allowlist with a LUN list" "allowlist names persist"
+
+# A disk that goes and comes back under the same name (a USB drive replugged,
+# found on wly): the guard keys its marks on diskseq, so the new instance is
+# made read-only again, while a pass over the same instance leaves it alone.
+fake_disks
+printf '%s\n' "$cheetah_rw" > "$B/etc/omamobile-ufs-rw"
+mkdir -p "$B/sys/block/sdi/sdi1"
+echo 41 > "$B/sys/block/sdi/diskseq"
+echo 0 > "$B/sys/block/sdi/ro"; : > "$B/dev/sdi"
+printf 'PARTN=1\n' > "$B/sys/block/sdi/sdi1/uevent"
+echo 0 > "$B/sys/block/sdi/sdi1/ro"; : > "$B/dev/sdi1"
+guard
+[[ $(cat "$B/sys/block/sdi/ro") == 1 && $(cat "$B/sys/block/sdi/sdi1/ro") == 1 ]] || fail "a USB drive is made read-only"
+# Same instance, made writable by hand: not the pass's job (ufs_unguarded's)
+echo 0 > "$B/sys/block/sdi/sdi1/ro"
+guard
+[[ $(cat "$B/sys/block/sdi/sdi1/ro") == 0 ]] || fail "a pass leaves an instance it already guarded alone"
+# Unplugged and back: a new diskseq, writable again as the kernel makes it
+echo 42 > "$B/sys/block/sdi/diskseq"
+echo 0 > "$B/sys/block/sdi/ro"
+guard
+[[ $(cat "$B/sys/block/sdi/ro") == 1 && $(cat "$B/sys/block/sdi/sdi1/ro") == 1 ]] \
+  || fail "a drive back under the same name is made read-only again"
+[[ $(grep -c '/dev/sdi1 set read-only' "$B/dev/kmsg") == 2 ]] || fail "the second instance is logged"
+[[ $(writable) == "$cheetah_rw" ]] || fail "the UFS allowlist is unchanged (got: $(writable))"
+pass "a drive replugged under the same name is guarded again (diskseq)"
+
+# A failure is logged once per instance, and again for a new one
+fake_disks
+mkdir -p "$B/sys/block/sdg"; echo 7 > "$B/sys/block/sdg/diskseq"
+echo 0 > "$B/sys/block/sdg/ro"; : > "$B/dev/sdg"
+cat > "$t/bin/blockdev" <<'EOS'
+#!/bin/sh
+exit 1
+EOS
+guard; guard
+[[ $(grep -c 'FAILED to set .*/dev/sdg read-only' "$B/dev/kmsg") == 1 ]] || fail "a failure is logged once"
+echo 8 > "$B/sys/block/sdg/diskseq"
+guard
+[[ $(grep -c 'FAILED to set .*/dev/sdg read-only' "$B/dev/kmsg") == 2 ]] || fail "a new instance's failure is logged"
+pass "a failure is logged once per disk instance"
