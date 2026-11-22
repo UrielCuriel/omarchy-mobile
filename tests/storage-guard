@@ -300,3 +300,100 @@ echo 8 > "$B/sys/block/sdg/diskseq"
 guard
 [[ $(grep -c 'FAILED to set .*/dev/sdg read-only' "$B/dev/kmsg") == 2 ]] || fail "a new instance's failure is logged"
 pass "a failure is logged once per disk instance"
+
+# External root (OMAMOBILE_EXTROOT, local bring-up): a USB disk, behind a fake
+# xHCI path as on wly, whose partition labelled as asked stays writable;
+# everything else is guarded, every UFS partition read-only as for NFS.
+usb_disk() { # NAME LABEL1 LABEL2: a USB disk with two ext4 partitions
+  local d=$B/devices/a600000.usb/xhci-hcd.0.auto/usb2/2-1/host1/block/$1 i=0 l
+  mkdir -p "$d"; ln -s "$d" "$B/sys/block/$1"
+  echo 0 > "$d/ro"; echo 30 > "$d/diskseq"; : > "$B/dev/$1"
+  for l in "$2" "$3"; do
+    i=$((i + 1)); mkdir -p "$d/$1$i"
+    printf 'PARTN=%s\n' "$i" > "$d/$1$i/uevent"; echo 0 > "$d/$1$i/ro"; : > "$B/dev/$1$i"
+    mkdir -p "$B/labels"; echo "$l" > "$B/labels/$1$i"
+  done
+}
+cat > "$t/bin/dumpe2fs" <<EOF2
+#!/bin/sh
+f=$B/labels/\${2##*/}
+[ -e "\$f" ] || exit 1
+echo "Filesystem volume name:   \$(cat "\$f")"
+EOF2
+chmod +x "$t/bin/dumpe2fs"
+cat > "$t/bin/blockdev" <<EOF2
+#!/bin/sh
+[ "\$1" = --setro ] || exit 1
+n=\${2##*/}
+for f in $B/sys/block/\$n/ro $B/sys/block/*/\$n/ro; do [ -f "\$f" ] && echo 1 > "\$f"; done
+exit 0
+EOF2
+chmod +x "$t/bin/blockdev"
+
+fake_disks
+printf '%s\n' "$cheetah_rw" > "$B/etc/omamobile-ufs-rw"
+printf 'omamobile-sd\n' > "$B/etc/omamobile-extroot"
+usb_disk sdh omamobile-sd data
+mkdir -p "$B/labels"; echo omamobile-sd > "$B/labels/sda7"   # userdata, labelled the same
+guard
+[[ $(cat "$B/sys/block/sdh/sdh1/ro") == 0 ]] || { cat "$B/dev/kmsg"; fail "extroot: the labelled USB partition stays writable"; }
+[[ $(cat "$B/sys/block/sdh/sdh2/ro") == 1 ]] || fail "extroot: another partition on that disk is read-only"
+[[ ! -e $B/dev/sdh && $(cat "$B/sys/block/sdh/ro") == 0 ]] || fail "extroot: the disk's whole-disk node is removed, the disk left writable"
+[[ -z $(writable) && $(cat "$B/sys/block/sda/ro") == 1 ]] || fail "extroot: every UFS partition read-only, userdata's label notwithstanding (got: $(writable))"
+grep -q 'external root requested: every UFS partition read-only' "$B/dev/kmsg" || fail "extroot: the mode is logged"
+grep -q '/dev/sdh1 left writable (external root, label omamobile-sd)' "$B/dev/kmsg" || fail "extroot: the exception is logged"
+[[ -z $(unguarded) ]] || fail "extroot: the hand-over check accepts the external root (got: $(unguarded))"
+echo 0 > "$B/sys/block/sdh/sdh2/ro"
+[[ $(unguarded) == "sdh2" ]] || fail "extroot: anything else writable is still reported (got: $(unguarded))"
+pass "external root: only the labelled partition on a USB disk stays writable; UFS all read-only"
+
+fake_disks
+printf '%s\n' "$cheetah_rw" > "$B/etc/omamobile-ufs-rw"
+usb_disk sdh omamobile-sd data
+guard
+[[ $(cat "$B/sys/block/sdh/sdh1/ro") == 1 && -e $B/dev/sdh ]] || fail "without the mode, a labelled USB partition is read-only"
+[[ $(writable) == "$cheetah_rw" ]] || fail "without the mode, the UFS allowlist is unchanged (got: $(writable))"
+pass "without OMAMOBILE_EXTROOT a labelled USB partition is guarded like any other"
+
+grep -q 'OMAMOBILE_EXTROOT is for local bring-up only, not --release' bin/omamobile || fail "OMAMOBILE_EXTROOT is refused for a release"
+grep -q 'OMAMOBILE_EXTROOT and OMAMOBILE_NFSROOT are exclusive' bin/omamobile || fail "OMAMOBILE_EXTROOT and OMAMOBILE_NFSROOT exclude each other"
+awk '/^boot_extroot\(\) \{/ {on = 1} on && /ufs_unguarded/ {u = NR} on && /kill -9 -1/ {k = NR} on && /^}/ {exit} END {exit !(u && k && u < k)}' initramfs/init \
+  || fail "boot_extroot checks ufs_unguarded before it stops the initramfs's processes"
+pass "OMAMOBILE_EXTROOT: local only, exclusive with NFS, hand-over check before the switch"
+
+# The kernel adds a disk before its partitions (seen on wly: sdh at 9.84 s,
+# sdh1 at 10.13 s): in extroot mode the guard waits up to 15 s for a USB
+# disk's partitions before deciding, then guards one that shows none.
+fake_disks
+printf 'omamobile-sd\n' > "$B/etc/omamobile-extroot"
+d=$B/devices/a600000.usb/xhci-hcd.0.auto/usb2/2-1/host1/block/sdh
+mkdir -p "$d"; ln -s "$d" "$B/sys/block/sdh"; echo 0 > "$d/ro"; echo 31 > "$d/diskseq"; : > "$B/dev/sdh"
+guard
+[[ $(cat "$d/ro") == 0 && -e $B/dev/sdh ]] || fail "extroot: a USB disk with no partitions yet is left for a later pass"
+mkdir -p "$d/sdh1" "$B/labels"; printf 'PARTN=1\n' > "$d/sdh1/uevent"; echo 0 > "$d/sdh1/ro"; : > "$B/dev/sdh1"
+echo omamobile-sd > "$B/labels/sdh1"
+guard
+[[ $(cat "$d/ro") == 0 && ! -e $B/dev/sdh && $(cat "$d/sdh1/ro") == 0 ]] \
+  || { cat "$B/dev/kmsg"; fail "extroot: once its partition shows, the root's disk stays writable"; }
+pass "external root: a disk seen before its partitions is still recognised"
+
+fake_disks
+printf 'omamobile-sd\n' > "$B/etc/omamobile-extroot"
+mkdir -p "$d"; ln -s "$d" "$B/sys/block/sdh"; echo 0 > "$d/ro"; echo 32 > "$d/diskseq"; : > "$B/dev/sdh"
+mkdir -p "$B/run/ufs-ro"
+echo "32 $(( $(cut -d. -f1 /proc/uptime) - 20 ))" > "$B/run/ufs-ro/pend-sdh"
+guard
+[[ $(cat "$d/ro") == 1 ]] || fail "extroot: a USB disk that shows no partitions for 15 s is read-only"
+pass "external root: a USB disk with no partitions after 15 s is guarded as usual"
+
+# An empty card-reader slot (seen on wly: the hub's SD slot, size 0, setro
+# fails) has nothing to write: the hand-over check skips it, so it can't hold
+# an external root back; a writable disk with a medium is still reported.
+fake_disks
+printf '%s\n' "$cheetah_rw" > "$B/etc/omamobile-ufs-rw"
+guard
+mkdir -p "$B/sys/block/sdg"; echo 0 > "$B/sys/block/sdg/ro"; echo 0 > "$B/sys/block/sdg/size"
+[[ -z $(unguarded) ]] || fail "an empty slot (size 0) is not reported (got: $(unguarded))"
+echo 2048 > "$B/sys/block/sdg/size"
+[[ $(unguarded) == "sdg" ]] || fail "the same slot with a medium is reported (got: $(unguarded))"
+pass "the hand-over check skips a disk with no medium"

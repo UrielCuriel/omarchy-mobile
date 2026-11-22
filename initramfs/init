@@ -63,10 +63,17 @@ UFS_RW=""
 UFS_RW_LUNS=""
 # Is $1 a disk that holds allowlisted partitions? sda always.
 ufs_rw_disk() { case " sda $UFS_RW_LUNS " in *" $1 "*) true ;; *) false ;; esac; }
+# The root is not on UFS (an NFS root, or an external one on USB): every UFS
+# partition read-only, the allowlist unused.
+ufs_all_ro() { [ -s /etc/omamobile-nfsroot ] || [ -s /etc/omamobile-extroot ]; }
 ufs_rw_load() {
   local list p
   if [ -s /etc/omamobile-nfsroot ]; then
     ufs_ro_log "NFS root requested: every UFS partition read-only"
+    return 0
+  fi
+  if [ -s /etc/omamobile-extroot ]; then
+    ufs_ro_log "external root requested: every UFS partition read-only"
     return 0
   fi
   if [ ! -s /etc/omamobile-ufs-rw ]; then
@@ -128,6 +135,64 @@ ufs_seq() {
   elif [ -r "${1%/*}/diskseq" ]; then read -r seq < "${1%/*}/diskseq"
   fi 2>/dev/null
 }
+# External root (/etc/omamobile-extroot, local bring-up only): one ext4 label.
+# On a disk behind a USB host controller -- never the phone's UFS -- the
+# partition carrying exactly that label is left writable, and its disk's
+# whole-disk node is removed, as sda's is; everything else is guarded as
+# usual. Its mark, /run/ufs-ro/ext-<name>, holds the disk's diskseq.
+ufs_usb_disk() {
+  case "$(readlink -f "/sys/block/${1%%[0-9]*}")" in */usb[0-9]*) return 0 ;; esac
+  return 1
+}
+ufs_ext_label() { dumpe2fs -h "$1" 2>/dev/null | sed -n 's/^Filesystem volume name: *//p'; }
+ufs_extroot_marked() { # SYSFS_PATH NAME: guarded as the external root this instance
+  local seq mark
+  [ -s /etc/omamobile-extroot ] && [ -e "/run/ufs-ro/ext-$2" ] || return 1
+  ufs_seq "$1"
+  mark=; read -r mark 2>/dev/null < "/run/ufs-ro/ext-$2"
+  [ "$mark" = "$seq" ]
+}
+ufs_extroot_pass() { # SYSFS_PATH NAME: 0 if handled here (left writable or waiting)
+  local want p found= mark
+  [ -s /etc/omamobile-extroot ] || return 1
+  ufs_usb_disk "$2" || return 1
+  read -r want < /etc/omamobile-extroot
+  case "$want" in ''|*[!a-z0-9-]*) return 1 ;; esac
+  if [ "$2" = "${2%%[0-9]*}" ]; then
+    # A whole disk: left writable only if one of its partitions is the root
+    local parts=
+    for p in "$1"/"$2"*; do
+      [ -e "$p/ro" ] || continue
+      parts=1
+      [ -b "/dev/${p##*/}" ] || return 0  # partition node not there yet: next pass
+      [ "$(ufs_ext_label "/dev/${p##*/}")" = "$want" ] && found=1
+    done
+    if [ -z "$parts" ]; then
+      # The kernel adds a disk before its partitions: give them up to 15 s,
+      # then guard a disk that still shows none as usual
+      local now first
+      ufs_seq "$1"
+      now=$(cut -d. -f1 /proc/uptime)
+      first=; read -r mark first 2>/dev/null < "/run/ufs-ro/pend-$2"
+      if [ "$mark" != "$seq" ] || [ -z "$first" ]; then
+        echo "$seq $now" > "/run/ufs-ro/pend-$2"; return 0
+      fi
+      [ $((now - first)) -lt 15 ] && return 0
+      return 1
+    fi
+    [ -n "$found" ] || return 1
+    rm -f "/dev/$2"
+    ufs_seq "$1"
+    echo "$seq" > "/run/ufs-ro/$2"; echo "$seq" > "/run/ufs-ro/ext-$2"
+    ufs_ro_log "/dev/$2: whole-disk node removed (external root's disk)"
+    return 0
+  fi
+  [ "$(ufs_ext_label "/dev/$2")" = "$want" ] || return 1
+  ufs_seq "$1"
+  echo "$seq" > "/run/ufs-ro/$2"; echo "$seq" > "/run/ufs-ro/ext-$2"
+  ufs_ro_log "/dev/$2 left writable (external root, label $want)"
+  return 0
+}
 ufs_ro_pass() {
   local s ro name part disk seq mark
   for s in /sys/block/sd* /sys/block/sd*/sd*; do
@@ -139,13 +204,16 @@ ufs_ro_pass() {
       [ "$mark" = "$seq" ] && continue
     fi
     [ -b "/dev/$name" ] || continue  # devtmpfs node not there yet: next pass
+    if ufs_extroot_pass "$s" "$name"; then
+      continue
+    fi
     if ufs_rw_disk "$name"; then
-      if [ -s /etc/omamobile-nfsroot ]; then
+      if ufs_all_ro; then
         blockdev --setro "/dev/$name"
         read -r ro < "$s/ro"
         if [ "$ro" = 1 ]; then
           echo "$seq" > "/run/ufs-ro/$name"
-          ufs_ro_log "/dev/$name set read-only for NFS root"
+          ufs_ro_log "/dev/$name set read-only (root not on UFS)"
           continue
         fi
         ufs_ro_log "FAILED to set /dev/$name read-only for NFS root"
@@ -183,11 +251,16 @@ ufs_ro_pass() {
 # Prints every disk or partition that is writable but not on the allowlist
 # (sda itself excepted: its node is removed). Empty means the guard holds.
 ufs_unguarded() {
-  local s name part ro
+  local s name part ro size
   for s in /sys/block/sd* /sys/block/sd*/sd*; do
     [ -r "$s/ro" ] || continue
     name=${s##*/}
-    ufs_rw_disk "$name" && [ ! -s /etc/omamobile-nfsroot ] && continue
+    ufs_rw_disk "$name" && ! ufs_all_ro && continue
+    ufs_extroot_marked "$s" "$name" && continue
+    # No medium (an empty card-reader slot: size 0, and setro fails on it):
+    # nothing on it can be written
+    size=; read -r size 2>/dev/null < "$s/size"
+    [ "$size" = 0 ] && continue
     read -r ro < "$s/ro"
     [ "$ro" = 0 ] || continue
     part=$(ufs_partname "$s")
@@ -366,14 +439,16 @@ dropbear -R -E -p 22 2>/dev/null && say "ssh: root@172.16.42.1"
 ( while true; do setsid getty -n -l /bin/sh 115200 ttyGS0 vt100; sleep 1; done ) &
 
 # Wi-Fi rescue link for local bring-up, so ssh survives losing USB (testing
-# USB roles, replugging the cable). Only with omamobile.initramfs, and only
-# when the image carries /etc/omamobile-wifi/wpa_supplicant.conf and
+# USB roles, replugging the cable). Only with omamobile.initramfs or an
+# external root requested (a hub makes the phone the USB host, so a failed
+# external root would leave no other way in), and only when the image
+# carries /etc/omamobile-wifi/wpa_supplicant.conf and
 # /etc/omamobile-wifi/address (one "ip/prefix" line). Nothing in this
 # repository packs them: the network's key belongs to the developer, who
 # appends them as a cpio of their own. No files, no change.
 wifi_rescue() {
   local conf=/etc/omamobile-wifi/wpa_supplicant.conf
-  grep -q omamobile.initramfs /proc/cmdline || return 0
+  grep -q omamobile.initramfs /proc/cmdline || [ -s /etc/omamobile-extroot ] || return 0
   [ -s $conf ] && [ -s /etc/omamobile-wifi/address ] || return 0
   command -v wpa_supplicant >/dev/null || {
     say "wifi: no wpa_supplicant (INITRAMFS_RADIO_TOOLS=1)"; return 0; }
@@ -497,6 +572,56 @@ grow_root() {
 # Boot the Arch root from NFS instead of the UFS, for bring-up: nothing on the
 # phone is written and the stock OS is left alone, so a root filesystem can be
 # tried before anyone decides to install it. Enabled only by the presence of
+# Root on an external USB disk, for local bring-up: /etc/omamobile-extroot holds
+# an ext4 label; the guard leaves exactly that partition writable (see
+# ufs_extroot_pass) and every UFS partition read-only. No file, no change.
+boot_extroot() {
+  local want p dev="" n i check open
+  grep -q omamobile.initramfs /proc/cmdline && return 1
+  read -r want 2>/dev/null < /etc/omamobile-extroot
+  case "$want" in ''|*[!a-z0-9-]*) say "extroot: invalid label"; return 1 ;; esac
+  say "extroot: waiting for an ext4 partition labelled $want on USB"
+  # USB comes up with OTG, some seconds after boot: wait up to ~90 s
+  i=0
+  while [ $i -lt 90 ]; do
+    ufs_ro_pass
+    n=0
+    for p in /sys/block/sd*/sd*; do
+      [ -r "$p/ro" ] && ufs_usb_disk "${p##*/}" || continue
+      [ "$(cat "$p/ro")" = 0 ] && ufs_extroot_marked "$p" "${p##*/}" || continue
+      n=$((n + 1)); dev=/dev/${p##*/}
+    done
+    [ "$n" -gt 0 ] && break
+    sleep 1; i=$((i + 1))
+  done
+  [ "$n" = 1 ] || { say "extroot: $n writable partitions labelled $want (need exactly one)"; return 1; }
+  check=0
+  e2fsck -p "$dev" >/dev/null 2>&1 || check=$?
+  case $check in
+    0|1) ;;
+    *) say "extroot: check of $dev failed (status $check)"; return 1 ;;
+  esac
+  mkdir -p /newroot
+  mount -t ext4 -o rw,relatime "$dev" /newroot || { say "extroot: cannot mount $dev"; return 1; }
+  if [ ! -x /newroot/usr/lib/systemd/systemd ]; then
+    say "extroot: no systemd on $dev"; umount /newroot; return 1
+  fi
+  ufs_ro_pass
+  open=$(ufs_unguarded)
+  if [ -n "$open" ]; then
+    say "extroot: writable outside the external root: $(echo "$open" | tr "\n" " ")"
+    umount /newroot
+    return 1
+  fi
+  say "extroot: switching to Arch Linux on $dev"
+  kill -9 -1 2>/dev/null
+  sleep 1
+  for m in /dev /proc /sys /run; do
+    mkdir -p "/newroot$m" && mount --move "$m" "/newroot$m"
+  done
+  exec switch_root /newroot /usr/lib/systemd/systemd
+}
+
 # /etc/omamobile-nfsroot, holding one line, "<host>:<path>" -- no file, no change.
 # The USB gadget and its address are already up by the time this runs, and the
 # kernel keeps them across the switch, so the mount survives switch_root.
@@ -637,6 +762,9 @@ boot_root() {
 if [ -s /etc/omamobile-nfsroot ]; then
   boot_nfs
   say "nfsroot: requested root unavailable (staying in the initramfs)"
+elif [ -s /etc/omamobile-extroot ]; then
+  boot_extroot
+  say "extroot: requested root unavailable (staying in the initramfs)"
 else
   boot_root
 fi

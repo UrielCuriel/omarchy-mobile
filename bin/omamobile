@@ -684,6 +684,13 @@ cmd_initramfs() {
     [[ $OMAMOBILE_NFSROOT =~ ^[A-Za-z0-9.-]+:/[A-Za-z0-9._/-]+$ && $OMAMOBILE_NFSROOT != *..* && $OMAMOBILE_NFSROOT != *//* ]] ||
       die "OMAMOBILE_NFSROOT must be a host and absolute export path, for example 172.16.42.2:/srv/nfs/dipper"
   fi
+  if [[ -n ${OMAMOBILE_EXTROOT:-} ]]; then
+    ((release == 0)) || die "OMAMOBILE_EXTROOT is for local bring-up only, not --release"
+    [[ -z ${OMAMOBILE_NFSROOT:-} ]] || die "OMAMOBILE_EXTROOT and OMAMOBILE_NFSROOT are exclusive"
+    # An ext4 volume label (at most 16 bytes): lower-case letters, digits, dashes
+    [[ $OMAMOBILE_EXTROOT =~ ^[a-z0-9][a-z0-9-]{0,15}$ ]] ||
+      die "OMAMOBILE_EXTROOT must be an ext4 label of lower-case letters, digits and dashes, for example omamobile-sd"
+  fi
   local tarball="alpine-minirootfs-$ver-aarch64.tar.gz"
   local sum=9bf70a7f18ea44094cbb5f70c58f9af129c8214745743db0e68e5502cc2ce773
   mkdir -p "$dl"
@@ -760,6 +767,13 @@ cmd_initramfs() {
     printf '%s\n' "$OMAMOBILE_NFSROOT" > "$stage/etc/omamobile-nfsroot"
   else
     rm -f "$stage/etc/omamobile-nfsroot"
+  fi
+  # A root on an external USB disk, found by its ext4 label (initramfs/init's
+  # boot_extroot); every UFS partition stays read-only, as for an NFS root
+  if [[ -n ${OMAMOBILE_EXTROOT:-} ]]; then
+    printf '%s\n' "$OMAMOBILE_EXTROOT" > "$stage/etc/omamobile-extroot"
+  else
+    rm -f "$stage/etc/omamobile-extroot"
   fi
   # Modules the init loads before anything else (INITRAMFS_MODULES, in load
   # order), from this kernel build's modules_install: the directory of this

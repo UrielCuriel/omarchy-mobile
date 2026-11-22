@@ -71,14 +71,20 @@ with tempfile.TemporaryDirectory() as tmp:
 
     nfsfile = p / 'nfsroot'
     dispatch = source.rsplit('# A requested NFS root must not silently fall through', 1)[1].split('\nfi', 1)[0].split('\n', 1)[1] + '\nfi\n'
-    assert len(dispatch.splitlines()) == 6 and dispatch.count('boot_nfs') == 1 and dispatch.count('boot_root') == 1
+    assert len(dispatch.splitlines()) == 9 and dispatch.count('boot_nfs') == 1 \
+        and dispatch.count('boot_extroot') == 1 and dispatch.count('boot_root') == 1
     assert all(word not in dispatch for word in ('/sys/', 'mount', 'kill', 'blockdev', 'devmem'))
-    for requested in (False, True):
-        nfsfile.write_text('host:/export\n' if requested else '')
-        spies = 'say() { :; }; boot_nfs() { echo nfs; return 1; }; boot_root() { echo userdata; return 1; }\n'
-        result = subprocess.run(['/bin/sh', '-c', spies + dispatch.replace('/etc/omamobile-nfsroot', str(nfsfile))], capture_output=True, text=True)
-        assert result.stdout.strip() == ('nfs' if requested else 'userdata'), result
-    print('ok - requested NFS failure never falls through to userdata policy')
+    extfile = p / 'extroot'
+    for nfs, ext, want in ((False, False, 'userdata'), (True, False, 'nfs'),
+                           (False, True, 'extroot'), (True, True, 'nfs')):
+        nfsfile.write_text('host:/export\n' if nfs else '')
+        extfile.write_text('omamobile-sd\n' if ext else '')
+        spies = ('say() { :; }; boot_nfs() { echo nfs; return 1; }; '
+                 'boot_extroot() { echo extroot; return 1; }; boot_root() { echo userdata; return 1; }\n')
+        script = dispatch.replace('/etc/omamobile-nfsroot', str(nfsfile)).replace('/etc/omamobile-extroot', str(extfile))
+        result = subprocess.run(['/bin/sh', '-c', spies + script], capture_output=True, text=True)
+        assert result.stdout.strip() == want, result
+    print('ok - a requested NFS or external root that fails never falls through to userdata policy')
 
     modefile = p / 'mode'
     for value, calls_arch in ((None, True), ('persistent-development', True),
