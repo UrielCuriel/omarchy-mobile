@@ -8,6 +8,12 @@
 [Match]
 Name=usb0
 
+# usb0 has no carrier whenever the phone is not plugged into the laptop
+# (with a USB-C hub it is the USB host). Without this, networkd reports the
+# system offline even on Wi-Fi, and systemd-timesyncd never syncs.
+[Link]
+RequiredForOnline=no
+
 [Network]
 Address=172.16.42.1/24
 DNS=1.1.1.1
